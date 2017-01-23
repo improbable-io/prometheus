@@ -215,7 +215,7 @@ func lookup(name string, queryType uint16, client *dns.Client, servAddr string, 
 	if edns {
 		msg.SetEdns0(dns.DefaultMsgSize, false)
 	}
-
+	client.Net = "tcp"
 	response, _, err := client.Exchange(msg, servAddr)
 	if err == dns.ErrTruncated {
 		if client.Net == "tcp" {
