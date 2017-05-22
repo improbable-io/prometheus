@@ -51,6 +51,7 @@ var cfg = struct {
 	queryEngine        promql.EngineOptions
 	web                web.Options
 	tsdb               tsdb.Options
+	appendableBlocks int
 
 	alertmanagerURLs stringset
 	prometheusURL    string
@@ -140,6 +141,11 @@ func init() {
 	cfg.fs.DurationVar(
 		&cfg.tsdb.Retention, "storage.tsdb.retention", 15*24*time.Hour,
 		"How long to retain samples in the storage.",
+	)
+	// TODO(mwitkow): Nuke this, this is a hack to know the old flag.
+	cfg.fs.IntVar(
+		&cfg.appendableBlocks, "storage.tsdb.appendable-blocks", 2,
+		"Number of head blocks that can be appended to.",
 	)
 	cfg.fs.StringVar(
 		&cfg.localStorageEngine, "storage.local.engine", "persisted",
