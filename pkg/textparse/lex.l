@@ -71,7 +71,7 @@ M     [a-zA-Z_:]
                                       l.offsets = append(l.offsets, l.i)
 
 <lstateLabels>[ \t]+
-<lstateLabels>\}                      s = lstateValue
+<lstateLabels>,?\}                    s = lstateValue
                                       l.mend = l.i
 <lstateLabels>,?                      s = lstateLName
                                       l.offsets = append(l.offsets, l.i)
