@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"unicode/utf8"
 
 	"github.com/prometheus/prometheus/pkg/value"
 )
@@ -145,7 +146,7 @@ yystate9:
 	c = l.next()
 	switch {
 	default:
-		goto yyrule14
+		goto yyrule13
 	case c >= '\x01' && c <= '\b' || c == '\v' || c == '\f' || c >= '\x0e' && c <= '\x1f' || c >= '!' && c <= 'ÿ':
 		goto yystate9
 	}
@@ -154,7 +155,7 @@ yystate10:
 	c = l.next()
 	switch {
 	default:
-		goto yyrule12
+		goto yyrule11
 	case c == '\t' || c == ' ':
 		goto yystate10
 	}
@@ -163,7 +164,7 @@ yystate11:
 	c = l.next()
 	switch {
 	default:
-		goto yyrule14
+		goto yyrule13
 	case c == 'a':
 		goto yystate12
 	case c >= '\x01' && c <= '\b' || c == '\v' || c == '\f' || c >= '\x0e' && c <= '\x1f' || c >= '!' && c <= '`' || c >= 'b' && c <= 'ÿ':
@@ -174,7 +175,7 @@ yystate12:
 	c = l.next()
 	switch {
 	default:
-		goto yyrule14
+		goto yyrule13
 	case c == 'N':
 		goto yystate13
 	case c >= '\x01' && c <= '\b' || c == '\v' || c == '\f' || c >= '\x0e' && c <= '\x1f' || c >= '!' && c <= 'M' || c >= 'O' && c <= 'ÿ':
@@ -185,7 +186,7 @@ yystate13:
 	c = l.next()
 	switch {
 	default:
-		goto yyrule13
+		goto yyrule12
 	case c >= '\x01' && c <= '\b' || c == '\v' || c == '\f' || c >= '\x0e' && c <= '\x1f' || c >= '!' && c <= 'ÿ':
 		goto yystate9
 	}
@@ -209,13 +210,13 @@ yystart14:
 
 yystate15:
 	c = l.next()
-	goto yyrule18
+	goto yyrule17
 
 yystate16:
 	c = l.next()
 	switch {
 	default:
-		goto yyrule15
+		goto yyrule14
 	case c == '\t' || c == ' ':
 		goto yystate16
 	}
@@ -224,7 +225,7 @@ yystate17:
 	c = l.next()
 	switch {
 	default:
-		goto yyrule17
+		goto yyrule16
 	case c == '\n' || c == '\r':
 		goto yystate17
 	}
@@ -233,7 +234,7 @@ yystate18:
 	c = l.next()
 	switch {
 	default:
-		goto yyrule16
+		goto yyrule15
 	case c >= '0' && c <= '9':
 		goto yystate18
 	}
@@ -310,8 +311,6 @@ yystart26:
 		goto yyabort
 	case c == '"':
 		goto yystate27
-	case c == '\'':
-		goto yystate30
 	}
 
 yystate27:
@@ -336,30 +335,6 @@ yystate29:
 		goto yyabort
 	case c >= '\x01' && c <= '\t' || c >= '\v' && c <= 'ÿ':
 		goto yystate27
-	}
-
-yystate30:
-	c = l.next()
-	switch {
-	default:
-		goto yystate30 // c >= '\x00' && c <= '&' || c >= '(' && c <= '[' || c >= ']' && c <= 'ÿ'
-	case c == '\'':
-		goto yystate31
-	case c == '\\':
-		goto yystate32
-	}
-
-yystate31:
-	c = l.next()
-	goto yyrule11
-
-yystate32:
-	c = l.next()
-	switch {
-	default:
-		goto yyabort
-	case c >= '\x01' && c <= '\t' || c >= '\v' && c <= 'ÿ':
-		goto yystate30
 	}
 
 yyrule1: // \0
@@ -413,27 +388,25 @@ yyrule9: // {S}({L}|{D})*=
 yyrule10: // \"(\\.|[^\\"]|\0)*\"
 	{
 		s = lstateLabels
+		if !utf8.Valid(l.b[l.offsets[len(l.offsets)-1]+2 : l.i-1]) {
+			l.err = fmt.Errorf("Invalid UTF-8 label value.")
+			return -1
+		}
 		l.offsets = append(l.offsets, l.i-1)
 		goto yystate0
 	}
-yyrule11: // \'(\\.|[^\\']|\0)*\'
-	{
-		s = lstateLabels
-		l.offsets = append(l.offsets, l.i-1)
-		goto yystate0
-	}
-yyrule12: // [ \t]+
+yyrule11: // [ \t]+
 	{
 		l.vstart = l.i
 		goto yystate0
 	}
-yyrule13: // (NaN)
+yyrule12: // (NaN)
 	{
 		l.val = math.Float64frombits(value.NormalNaN)
 		s = lstateTimestamp
 		goto yystate0
 	}
-yyrule14: // [^\n \t\r]+
+yyrule13: // [^\n \t\r]+
 	{
 		// We don't parse strictly correct floats as the conversion
 		// repeats the effort anyway.
@@ -444,12 +417,12 @@ yyrule14: // [^\n \t\r]+
 		s = lstateTimestamp
 		goto yystate0
 	}
-yyrule15: // [ \t]+
+yyrule14: // [ \t]+
 	{
 		l.tstart = l.i
 		goto yystate0
 	}
-yyrule16: // {D}+
+yyrule15: // {D}+
 	{
 		ts, err := strconv.ParseInt(yoloString(l.b[l.tstart:l.i]), 10, 64)
 		if err != nil {
@@ -459,12 +432,12 @@ yyrule16: // {D}+
 		l.ts = &ts
 		goto yystate0
 	}
-yyrule17: // [\r\n]+
+yyrule16: // [\r\n]+
 	{
 		l.nextMstart = l.i
 		return 1
 	}
-yyrule18: // \0
+yyrule17: // \0
 	{
 		return 1
 

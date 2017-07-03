@@ -112,13 +112,15 @@ type scrapePool struct {
 
 	// Constructor for new scrape loops. This is settable for testing convenience.
 	newLoop func(context.Context, scraper, func() storage.Appender, func() storage.Appender, log.Logger) loop
+
+	logger log.Logger
 }
 
-func newScrapePool(ctx context.Context, cfg *config.ScrapeConfig, app Appendable) *scrapePool {
+func newScrapePool(ctx context.Context, cfg *config.ScrapeConfig, app Appendable, logger log.Logger) *scrapePool {
 	client, err := httputil.NewClientFromConfig(cfg.HTTPClientConfig)
 	if err != nil {
 		// Any errors that could occur here should be caught during config validation.
-		log.Errorf("Error creating HTTP client for job %q: %s", cfg.JobName, err)
+		logger.Errorf("Error creating HTTP client for job %q: %s", cfg.JobName, err)
 	}
 
 	newLoop := func(
@@ -138,6 +140,7 @@ func newScrapePool(ctx context.Context, cfg *config.ScrapeConfig, app Appendable
 		targets:    map[uint64]*Target{},
 		loops:      map[uint64]loop{},
 		newLoop:    newLoop,
+		logger:     logger,
 	}
 }
 
@@ -175,7 +178,7 @@ func (sp *scrapePool) reload(cfg *config.ScrapeConfig) {
 	client, err := httputil.NewClientFromConfig(cfg.HTTPClientConfig)
 	if err != nil {
 		// Any errors that could occur here should be caught during config validation.
-		log.Errorf("Error creating HTTP client for job %q: %s", cfg.JobName, err)
+		sp.logger.Errorf("Error creating HTTP client for job %q: %s", cfg.JobName, err)
 	}
 	sp.config = cfg
 	sp.client = client
@@ -197,7 +200,7 @@ func (sp *scrapePool) reload(cfg *config.ScrapeConfig) {
 				func() storage.Appender {
 					return sp.reportAppender(t)
 				},
-				log.With("target", t.labels.String()),
+				sp.logger.With("target", t.labels.String()),
 			)
 		)
 		wg.Add(1)
@@ -227,7 +230,7 @@ func (sp *scrapePool) Sync(tgs []*config.TargetGroup) {
 	for _, tg := range tgs {
 		targets, err := targetsFromGroup(tg, sp.config)
 		if err != nil {
-			log.With("err", err).Error("creating targets failed")
+			sp.logger.With("err", err).Error("creating targets failed")
 			continue
 		}
 		all = append(all, targets...)
@@ -267,7 +270,7 @@ func (sp *scrapePool) sync(targets []*Target) {
 				func() storage.Appender {
 					return sp.reportAppender(t)
 				},
-				log.With("target", t.labels.String()),
+				sp.logger.With("target", t.labels.String()),
 			)
 
 			sp.targets[hash] = t
@@ -425,8 +428,9 @@ type loop interface {
 }
 
 type lsetCacheEntry struct {
-	lset labels.Labels
-	hash uint64
+	metric string
+	lset   labels.Labels
+	hash   uint64
 }
 
 type refEntry struct {
@@ -504,17 +508,24 @@ func (c *scrapeCache) getRef(met string) (string, bool) {
 	return e.ref, true
 }
 
-func (c *scrapeCache) addRef(met, ref string, lset labels.Labels) {
+func (c *scrapeCache) addRef(met, ref string, lset labels.Labels, hash uint64) {
+	if ref == "" {
+		return
+	}
+	// Clean up the label set cache before overwriting the ref for a previously seen
+	// metric representation. It won't be caught by the cleanup in iterDone otherwise.
+	if e, ok := c.refs[met]; ok {
+		delete(c.lsets, e.ref)
+	}
 	c.refs[met] = &refEntry{ref: ref, lastIter: c.iter}
 	// met is the raw string the metric was ingested as. The label set is not ordered
 	// and thus it's not suitable to uniquely identify cache entries.
 	// We store a hash over the label set instead.
-	c.lsets[ref] = &lsetCacheEntry{lset: lset, hash: lset.Hash()}
+	c.lsets[ref] = &lsetCacheEntry{metric: met, lset: lset, hash: hash}
 }
 
-func (c *scrapeCache) trackStaleness(ref string) {
-	e := c.lsets[ref]
-	c.seriesCur[e.hash] = e.lset
+func (c *scrapeCache) trackStaleness(hash uint64, lset labels.Labels) {
+	c.seriesCur[hash] = lset
 }
 
 func (c *scrapeCache) forEachStale(f func(labels.Labels) bool) {
@@ -579,7 +590,6 @@ mainLoop:
 		}
 
 		var (
-			total, added      int
 			start             = time.Now()
 			scrapeCtx, cancel = context.WithTimeout(sl.ctx, timeout)
 		)
@@ -591,18 +601,20 @@ mainLoop:
 			)
 		}
 
-		err := sl.scraper.scrape(scrapeCtx, buf)
+		scrapeErr := sl.scraper.scrape(scrapeCtx, buf)
 		cancel()
 		var b []byte
-		if err == nil {
+		if scrapeErr == nil {
 			b = buf.Bytes()
 		} else if errc != nil {
-			errc <- err
+			errc <- scrapeErr
 		}
+
 		// A failed scrape is the same as an empty scrape,
 		// we still call sl.append to trigger stale markers.
-		if total, added, err = sl.append(b, start); err != nil {
-			sl.l.With("err", err).Warn("append failed")
+		total, added, appErr := sl.append(b, start)
+		if appErr != nil {
+			sl.l.With("err", appErr).Warn("append failed")
 			// The append failed, probably due to a parse error or sample limit.
 			// Call sl.append again with an empty scrape to trigger stale markers.
 			if _, _, err := sl.append([]byte{}, start); err != nil {
@@ -610,7 +622,11 @@ mainLoop:
 			}
 		}
 
-		sl.report(start, time.Since(start), total, added, err)
+		if scrapeErr == nil {
+			scrapeErr = appErr
+		}
+
+		sl.report(start, time.Since(start), total, added, scrapeErr)
 		last = start
 
 		select {
@@ -729,7 +745,8 @@ loop:
 			switch err = app.AddFast(ref, t, v); err {
 			case nil:
 				if tp == nil {
-					sl.cache.trackStaleness(ref)
+					e := sl.cache.lsets[ref]
+					sl.cache.trackStaleness(e.hash, e.lset)
 				}
 			case storage.ErrNotFound:
 				ok = false
@@ -755,8 +772,19 @@ loop:
 			}
 		}
 		if !ok {
-			var lset labels.Labels
-			mets := p.Metric(&lset)
+			var (
+				lset labels.Labels
+				mets string
+				hash uint64
+			)
+			if e, ok := sl.cache.lsets[ref]; ok {
+				mets = e.metric
+				lset = e.lset
+				hash = e.hash
+			} else {
+				mets = p.Metric(&lset)
+				hash = lset.Hash()
+			}
 
 			var ref string
 			ref, err = app.Add(lset, t, v)
@@ -783,13 +811,11 @@ loop:
 			default:
 				break loop
 			}
-
-			sl.cache.addRef(mets, ref, lset)
-
 			if tp == nil {
 				// Bypass staleness logic if there is an explicit timestamp.
-				sl.cache.trackStaleness(ref)
+				sl.cache.trackStaleness(hash, lset)
 			}
+			sl.cache.addRef(mets, ref, lset, hash)
 		}
 		added++
 	}
@@ -920,7 +946,7 @@ func (sl *scrapeLoop) addReportSample(app storage.Appender, s string, t int64, v
 	ref, err := app.Add(met, t, v)
 	switch err {
 	case nil:
-		sl.cache.addRef(s2, ref, met)
+		sl.cache.addRef(s2, ref, met, met.Hash())
 		return nil
 	case storage.ErrOutOfOrderSample, storage.ErrDuplicateSampleForTimestamp:
 		return nil
